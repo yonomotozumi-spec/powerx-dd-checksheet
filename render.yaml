@@ -5,6 +5,7 @@ services:
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --timeout 300 --workers 1
+    healthCheckPath: /healthz
     envVars:
       - key: DATA_DIR
         value: /var/data/pxapp

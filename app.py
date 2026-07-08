@@ -38,8 +38,9 @@ def require_auth(fn):
         if APP_USER and APP_PASS:
             au = request.authorization
             if not au or au.username != APP_USER or au.password != APP_PASS:
-                return Response("認証が必要です", 401,
-                                {"WWW-Authenticate": 'Basic realm="PowerX DD (社内限定)"'})
+                # WWW-Authenticate の realm は ASCII のみ（HTTPヘッダは latin-1）
+                return Response("認証が必要です（社内限定）", 401,
+                                {"WWW-Authenticate": 'Basic realm="PowerX DD Internal"'})
         return fn(*a, **kw)
     return wrapper
 
