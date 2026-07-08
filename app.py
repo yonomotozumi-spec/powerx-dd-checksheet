@@ -13,6 +13,7 @@ PowerX 案件チェックシート 社内Webアプリ（Flask）。
 """
 import os, io, json, math, time, tempfile, datetime, urllib.parse, urllib.request, subprocess
 from functools import wraps
+from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, send_file, Response, abort
 
 import reinfolib_judge
@@ -83,21 +84,24 @@ def pref_code(lat, lon):
 
 
 def fetch_reinfolib(lat, lon, key, dest):
-    """reinfolibの各レイヤをヘッダ認証で取得し dest/<CODE>.geojson に保存。取得数を返す。"""
+    """reinfolibの各レイヤをヘッダ認証で並列取得し dest/<CODE>.geojson に保存。取得数を返す。"""
     os.makedirs(dest, exist_ok=True)
-    n = 0
-    for code, (z, _d) in reinfolib_judge.LAYERS.items():
+
+    def one(item):
+        code, (z, _d) = item
         x, y = reinfolib_judge.deg2num(lat, lon, z)
         url = REINFO.format(code=code, z=z, x=x, y=y)
         try:
             body = _get(url, headers={"Ocp-Apim-Subscription-Key": key})
             with open(os.path.join(dest, code + ".geojson"), "w", encoding="utf-8") as f:
                 f.write(body)
-            n += 1
-            time.sleep(0.15)  # 連続リクエストの間隔
+            return 1
         except Exception:
-            pass
-    return n
+            return 0
+
+    items = list(reinfolib_judge.LAYERS.items())
+    with ThreadPoolExecutor(max_workers=min(8, len(items))) as ex:
+        return sum(ex.map(one, items))
 
 
 # ───────────────────────── 生成 ─────────────────────────

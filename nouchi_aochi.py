@@ -28,6 +28,10 @@ def _pip_ring(lon, lat, ring):
 
 
 def _shape_contains(lon, lat, shape):
+    # バウンディングボックスで事前判定（点がbbox外のポリゴンは重い内外判定を省略）
+    bb = getattr(shape, "bbox", None)
+    if bb and len(bb) == 4 and (lon < bb[0] or lon > bb[2] or lat < bb[1] or lat > bb[3]):
+        return False
     pts = shape.points
     if not pts: return False
     parts = list(shape.parts) + [len(pts)]

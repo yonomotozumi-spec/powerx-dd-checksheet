@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --timeout 300 --workers 1
+    startCommand: gunicorn app:app --timeout 300 --workers 1 --threads 2 --worker-class gthread
     healthCheckPath: /healthz
     envVars:
       - key: DATA_DIR
