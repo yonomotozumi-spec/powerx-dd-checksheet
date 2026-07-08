@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: powerx-dd-checksheet
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --timeout 300 --workers 1
+    envVars:
+      - key: DATA_DIR
+        value: /var/data/pxapp
+      # 社内共有のreinfolib APIキー。Renderダッシュボードで値を設定（sync:falseで秘匿）
+      - key: REINFOLIB_API_KEY
+        sync: false
+      # 社内限定Basic認証（任意）。使う場合はダッシュボードで両方に値を設定
+      - key: APP_USER
+        sync: false
+      - key: APP_PASS
+        sync: false
+    disk:
+      name: a12-cache
+      mountPath: /var/data
+      sizeGB: 1
