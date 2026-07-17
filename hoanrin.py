@@ -12,8 +12,17 @@ import os, glob, zipfile, urllib.request
 
 A13_URL = "https://nlftp.mlit.go.jp/ksj/gml/data/A13/A13-15/A13-15_{p}_GML.zip"
 
-# 森林地域種別コード → 名称（A13_001 の区分）
-KIND = {1: "国有林", 2: "地域森林計画対象民有林", 3: "保安林", 4: "保安施設地区"}
+# A13 の森林地域区分コード → 名称。
+# 配布形式で属性が2系統あるため、値レンジで一意に解釈できるよう1つの表にまとめる。
+#   ・Shapefile/GML版: 属性 layer_no（土地利用基本計画のレイヤー番号）= 7〜10
+#       07=森林地域 / 08=国有林 / 09=地域森林計画対象民有林 / 10=保安林
+#   ・GeoJSON版: 属性 A13_001（森林地域種別コード）= 1〜4
+#       1=国有林 / 2=地域森林計画対象民有林 / 3=保安林 / 4=保安施設地区
+# 1〜4 と 7〜10 は重複しないため、どちらの属性を読んでも値だけで区分を確定できる。
+CODE = {
+    1: "国有林", 2: "地域森林計画対象民有林", 3: "保安林", 4: "保安施設地区",
+    7: "森林地域", 8: "国有林", 9: "地域森林計画対象民有林", 10: "保安林",
+}
 
 
 def _p2(pref_cd):
@@ -62,10 +71,10 @@ def ensure_a13(pref_cd, cachedir):
 
 
 def judge_hoanrin(lat, lon, pref_cd, cachedir):
-    """戻り値: (value, comment, kinds)。kindsは点が含まれる森林地域種別コードのset。失敗時は例外。"""
+    """戻り値: (value, comment, kinds)。kindsは点が含まれる森林地域区分名(str)のset。失敗時は例外。"""
     import shapefile  # pyshp
     paths = ensure_a13(pref_cd, cachedir)
-    hit = set()
+    names = set()
     for sp in paths:
         r = shapefile.Reader(sp, encoding="cp932", encodingErrors="replace")
         flds = [f[0].lower() for f in r.fields[1:]]
@@ -77,13 +86,20 @@ def judge_hoanrin(lat, lon, pref_cd, cachedir):
             continue
         for sr in r.iterShapeRecords():
             if _shape_contains(lon, lat, sr.shape):
-                try: hit.add(int(sr.record[idx]))
-                except Exception: pass
-    base_c = ("国土数値情報A13(森林地域)より1次判定。保安林の指定範囲・解除可否・"
-              "作業許可は都道府県森林部局へ照会（A13は2015年版・参考精度）")
-    if not hit:
-        return ("該当なし（森林地域外・A13）", base_c, hit)
-    # 保安林(3)・保安施設地区(4)を優先し、次に民有林(2)・国有林(1)を並べる
-    labels = [KIND[c] for c in (3, 4, 2, 1) if c in hit]
-    labels += [KIND.get(c, f"区分{c}") for c in sorted(hit) if c not in (1, 2, 3, 4)]
-    return ("／".join(labels), base_c, hit)
+                try: code = int(sr.record[idx])
+                except Exception: continue
+                names.add(CODE.get(code) or f"区分{code}")
+    base_c = ("国土数値情報A13(森林地域)より1次判定。保安林内は立木伐採・土地形質変更に許可、"
+              "開発には解除が必要な場合あり。指定範囲・可否は都道府県森林部局へ照会（A13は参考精度）")
+    is_hoanrin = ("保安林" in names) or ("保安施設地区" in names)
+    if is_hoanrin:
+        # DDではマイナス材料（制限あり）と一目で分かる文言にする
+        others = "／".join(n for n in ("地域森林計画対象民有林", "国有林", "森林地域") if n in names)
+        val = "⚠ 保安林に該当（開発制限あり：森林法の許可・解除の対象）" + (f"［{others}］" if others else "")
+    elif names:
+        order = ["地域森林計画対象民有林", "国有林", "森林地域"]
+        labels = [n for n in order if n in names] + [n for n in sorted(names) if n not in order]
+        val = "森林地域内・保安林ではない（" + "／".join(labels) + "）"
+    else:
+        val = "非該当（森林地域外）"
+    return (val, base_c, names)
