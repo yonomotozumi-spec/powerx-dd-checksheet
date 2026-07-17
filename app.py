@@ -14,7 +14,7 @@ PowerX 案件チェックシート 社内Webアプリ（Flask）。
 import os, io, json, math, time, tempfile, datetime, urllib.parse, urllib.request, subprocess
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
-from flask import Flask, request, send_file, Response, abort
+from flask import Flask, request, send_file, Response, abort, redirect
 
 import reinfolib_judge
 
@@ -281,9 +281,13 @@ def index():
     return render()
 
 
-@app.route("/generate", methods=["POST"])
+@app.route("/generate", methods=["GET", "POST"])
 @require_auth
 def gen():
+    # /generate はフォーム送信(POST)専用。直接アクセス・リロード・戻る等のGETは
+    # 405ではなく入力フォーム(トップ)へ誘導する。
+    if request.method == "GET":
+        return redirect("/")
     try:
         out, coord_source, notes = generate(request.form)
     except Exception as e:
