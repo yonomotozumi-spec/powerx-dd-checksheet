@@ -149,9 +149,14 @@ def generate(form):
     else:
         notes.append("APIキーが未設定のため、reinfolib自動判定はスキップ（各確認リンクは生成されます）。")
 
-    # 農地 青地/白地（A12）
+    # 都道府県コード（農地A12・森林A13の判定に使用）
     try:
         pc = pref_code(lat, lon)
+    except Exception:
+        pc = None
+
+    # 農地 青地/白地（A12）
+    try:
         if pc:
             from nouchi_aochi import judge_aochi
             val, cmt = judge_aochi(lat, lon, pc, DATA_DIR)
@@ -159,6 +164,23 @@ def generate(form):
             notes.append(f"農地(青地/白地)をA12から1次判定：{val}")
     except Exception as e:
         notes.append(f"農地(青地/白地)の自動判定はスキップしました（{type(e).__name__}）。地図で目視確認してください。")
+
+    # 森林地域／保安林（A13）
+    try:
+        if pc:
+            from hoanrin import judge_hoanrin
+            val, cmt, kinds = judge_hoanrin(lat, lon, pc, DATA_DIR)
+            values_data["values"]["12"] = {"value": val, "comment": cmt}
+            # 保安林(3)・保安施設地区(4)→森林法の保安林手続、地域森林計画対象民有林(2)→伐採届出/林地開発許可
+            if 3 in kinds or 4 in kinds:
+                values_data["permits"]["34"] = {"req": "要",
+                    "note": "保安林に該当 (国土数値情報A13)。立木伐採・土地形質変更には許可、開発には解除が必要な場合あり"}
+            if 2 in kinds:
+                values_data["permits"].setdefault("33", {"req": "要",
+                    "note": "地域森林計画対象民有林に該当 (A13)。1ha超開発は林地開発許可、伐採は届出"})
+            notes.append(f"森林地域/保安林をA13から1次判定：{val}")
+    except Exception as e:
+        notes.append(f"森林/保安林の自動判定はスキップしました（{type(e).__name__}）。都道府県の森林GISで目視確認してください。")
 
     # values.json 書き出し
     vpath = os.path.join(work, "values.json")
