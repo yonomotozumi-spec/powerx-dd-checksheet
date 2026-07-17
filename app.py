@@ -171,11 +171,11 @@ def generate(form):
             from hoanrin import judge_hoanrin
             val, cmt, kinds = judge_hoanrin(lat, lon, pc, DATA_DIR)
             values_data["values"]["12"] = {"value": val, "comment": cmt}
-            # 保安林(3)・保安施設地区(4)→森林法の保安林手続、地域森林計画対象民有林(2)→伐採届出/林地開発許可
-            if 3 in kinds or 4 in kinds:
+            # 保安林・保安施設地区→森林法の保安林手続、地域森林計画対象民有林→伐採届出/林地開発許可
+            if ("保安林" in kinds) or ("保安施設地区" in kinds):
                 values_data["permits"]["34"] = {"req": "要",
                     "note": "保安林に該当 (国土数値情報A13)。立木伐採・土地形質変更には許可、開発には解除が必要な場合あり"}
-            if 2 in kinds:
+            if "地域森林計画対象民有林" in kinds:
                 values_data["permits"].setdefault("33", {"req": "要",
                     "note": "地域森林計画対象民有林に該当 (A13)。1ha超開発は林地開発許可、伐採は届出"})
             notes.append(f"森林地域/保安林をA13から1次判定：{val}")
