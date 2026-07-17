@@ -8,9 +8,13 @@
 ※A13は2015年版・参考表示で精度保証なし。保安林の指定範囲・解除可否は都道府県森林部局へ照会。
 依存: pyshp (import shapefile)
 """
-import os, glob, zipfile, urllib.request
+import os, glob, zipfile, urllib.request, urllib.error
 
-A13_URL = "https://nlftp.mlit.go.jp/ksj/gml/data/A13/A13-15/A13-15_{p}_GML.zip"
+# A13(森林地域)は整備年度が複数ある（H27=15 / H23=11 / H17=05）。
+# 県によって特定年度が無いことがあるため、存在する年度を順に試す。
+A13_URL = "https://nlftp.mlit.go.jp/ksj/gml/data/A13/A13-{y}/A13-{y}_{p}_GML.zip"
+A13_YEARS = ["15", "11", "05"]
+_UA = {"User-Agent": "PowerX-DD-App/1.0"}
 
 # A13 の森林地域区分コード → 名称。
 # 配布形式で属性が2系統あるため、値レンジで一意に解釈できるよう1つの表にまとめる。
@@ -55,19 +59,40 @@ def _shape_contains(lon, lat, shape):
     return inside
 
 
+def _download(url, dest, timeout=120):
+    req = urllib.request.Request(url, headers=_UA)
+    with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as f:
+        f.write(r.read())
+
+
 def ensure_a13(pref_cd, cachedir):
-    """A13を都道府県単位でDL・展開し、.shpパス一覧を返す。"""
+    """A13を都道府県単位でDL・展開し、.shpパス一覧を返す。年度は存在するものを順に試す。"""
     p = _p2(pref_cd)
     d = os.path.join(cachedir, "a13", p)
     os.makedirs(d, exist_ok=True)
     shps = glob.glob(os.path.join(d, "**", "*.shp"), recursive=True)
-    if not shps:
-        zpath = os.path.join(d, f"A13-15_{p}.zip")
-        urllib.request.urlretrieve(A13_URL.format(p=p), zpath)
-        with zipfile.ZipFile(zpath) as z:
-            z.extractall(d)
+    if shps:
+        return shps
+    zpath = os.path.join(d, f"A13_{p}.zip")
+    errors = []
+    for y in A13_YEARS:
+        url = A13_URL.format(y=y, p=p)
+        try:
+            _download(url, zpath)
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+            errors.append(f"A13-{y}: {getattr(e, 'code', '')} {e}")
+            continue
+        try:
+            with zipfile.ZipFile(zpath) as z:
+                z.extractall(d)
+        except zipfile.BadZipFile as e:
+            errors.append(f"A13-{y}: BadZipFile {e}")
+            continue
         shps = glob.glob(os.path.join(d, "**", "*.shp"), recursive=True)
-    return shps
+        if shps:
+            return shps
+        errors.append(f"A13-{y}: 展開に.shp無し")
+    raise RuntimeError("A13ダウンロード失敗（" + pref_cd + "）: " + " / ".join(errors))
 
 
 def judge_hoanrin(lat, lon, pref_cd, cachedir):
