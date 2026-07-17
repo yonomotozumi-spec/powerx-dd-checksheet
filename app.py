@@ -180,7 +180,7 @@ def generate(form):
                     "note": "地域森林計画対象民有林に該当 (A13)。1ha超開発は林地開発許可、伐採は届出"})
             notes.append(f"森林地域/保安林をA13から1次判定：{val}")
     except Exception as e:
-        notes.append(f"森林/保安林の自動判定はスキップしました（{type(e).__name__}）。都道府県の森林GISで目視確認してください。")
+        notes.append(f"森林/保安林の自動判定はスキップしました（{type(e).__name__}: {str(e)[:200]}）。都道府県の森林GISで目視確認してください。")
 
     # values.json 書き出し
     vpath = os.path.join(work, "values.json")
