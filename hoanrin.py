@@ -59,10 +59,16 @@ def _shape_contains(lon, lat, shape):
     return inside
 
 
-def _download(url, dest, timeout=120):
+def _download(url, dest, timeout=45):
+    # gunicornのリクエストタイムアウト(300s)内に収めるため短めのtimeoutで、
+    # メモリに載せずチャンクでファイルへ書く（Render無料枠はRAM 512MB）
     req = urllib.request.Request(url, headers=_UA)
     with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as f:
-        f.write(r.read())
+        while True:
+            chunk = r.read(1 << 16)
+            if not chunk:
+                break
+            f.write(chunk)
 
 
 def ensure_a13(pref_cd, cachedir):
