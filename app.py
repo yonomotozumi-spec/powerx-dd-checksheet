@@ -11,7 +11,7 @@ PowerX 案件チェックシート 社内Webアプリ（Flask）。
 - 社内限定アクセス：環境変数 APP_USER / APP_PASS を設定すると Basic認証を要求する（未設定なら認証なし）。
 - Render 等の Python 対応ホストで `gunicorn app:app` として起動する想定。
 """
-import os, io, json, math, time, tempfile, datetime, urllib.parse, urllib.request, subprocess
+import os, io, json, math, time, tempfile, datetime, urllib.parse, urllib.request, subprocess, traceback
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, send_file, Response, abort, redirect
@@ -169,7 +169,10 @@ def generate(form):
     try:
         if pc:
             from hoanrin import judge_hoanrin
+            print(f"[gen] A13 judge start pref={pc}", flush=True)
+            _t0 = time.time()
             val, cmt, kinds = judge_hoanrin(lat, lon, pc, DATA_DIR)
+            print(f"[gen] A13 judge done in {time.time()-_t0:.1f}s: {val}", flush=True)
             values_data["values"]["12"] = {"value": val, "comment": cmt}
             # 保安林・保安施設地区→森林法の保安林手続、地域森林計画対象民有林→伐採届出/林地開発許可
             if ("保安林" in kinds) or ("保安施設地区" in kinds):
@@ -180,6 +183,7 @@ def generate(form):
                     "note": "地域森林計画対象民有林に該当 (A13)。1ha超開発は林地開発許可、伐採は届出"})
             notes.append(f"森林地域/保安林をA13から1次判定：{val}")
     except Exception as e:
+        print(f"[gen] A13 judge failed: {type(e).__name__}: {e}", flush=True)
         notes.append(f"森林/保安林の自動判定はスキップしました（{type(e).__name__}: {str(e)[:200]}）。都道府県の森林GISで目視確認してください。")
 
     # values.json 書き出し
@@ -317,6 +321,22 @@ def download(token):
 @app.route("/healthz")
 def healthz():
     return "ok"
+
+
+@app.errorhandler(Exception)
+def on_error(e):
+    # 想定外の例外でも素の「Internal Server Error」ではなく、原因の見えるページを返す。
+    # 全文トレースバックはRenderのLogsに出す。404等の通常のHTTPエラーはそのまま通す。
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return e
+    print("[error] unhandled exception:\n" + traceback.format_exc(), flush=True)
+    body = (f'<div class="note">⚠️ サーバ内部でエラーが発生しました：'
+            f'{type(e).__name__}: {str(e)[:300]}<br>'
+            f'再試行しても直らない場合は、この表示を管理者に伝えてください。</div>')
+    resp = render(body)
+    resp.status_code = 500
+    return resp
 
 
 if __name__ == "__main__":
