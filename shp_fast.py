@@ -120,8 +120,22 @@ def load_index(sp_path, fields):
     return idx
 
 
+def shp_intact(sp_path):
+    """.shp のヘッダ宣言長(バイト)と実ファイルサイズを比較し、切れていないか大まかに検証。
+    ダウンロードが途中で切れた等の破損キャッシュを検出するために使う。"""
+    try:
+        with open(sp_path, "rb") as f:
+            f.seek(24)
+            declared = struct.unpack(">i", f.read(4))[0] * 2  # 16bitワード→バイト
+        return declared >= 100 and os.path.getsize(sp_path) >= declared
+    except Exception:
+        return False
+
+
 def point_hits(sp_path, idx, lon, lat):
-    """点を含むレコードの属性値タプル一覧。bbox候補のみ.shpから個別読み出しして厳密判定。"""
+    """点を含むレコードの属性値タプル一覧。bbox候補のみ.shpから個別読み出しして厳密判定。
+    破損レコード(KSJの一部地域に既知の不良あり／切れたファイル)は個別にスキップし、
+    判定全体は止めない（本判定は1次・参考のため、読める地物で継続する）。"""
     cand = [i for i, (bb, _v) in enumerate(idx["rows"])
             if bb and bb[0] <= lon <= bb[2] and bb[1] <= lat <= bb[3]]
     if not cand:
@@ -130,6 +144,10 @@ def point_hits(sp_path, idx, lon, lat):
     r = shapefile.Reader(sp_path, encoding="cp932", encodingErrors="replace")
     out = []
     for i in cand:
-        if shape_contains(lon, lat, r.shape(i)):
+        try:
+            sh = r.shape(i)
+        except Exception:
+            continue  # このレコードだけ読めない → スキップして継続
+        if shape_contains(lon, lat, sh):
             out.append(idx["rows"][i][1])
     return out

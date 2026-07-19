@@ -8,7 +8,7 @@
 ※A13は2015年版・参考表示で精度保証なし。保安林の指定範囲・解除可否は都道府県森林部局へ照会。
 依存: pyshp (import shapefile)
 """
-import os, glob, zipfile, urllib.request, urllib.error
+import os, glob, zipfile, shutil, urllib.request, urllib.error
 
 # A13(森林地域)は整備年度が複数ある（H27=15 / H23=11 / H17=05）。
 # 県によって特定年度が無いことがあるため、存在する年度を順に試す。
@@ -73,12 +73,17 @@ def _download(url, dest, timeout=45):
 
 def ensure_a13(pref_cd, cachedir):
     """A13を都道府県単位でDL・展開し、.shpパス一覧を返す。年度は存在するものを順に試す。"""
+    from shp_fast import shp_intact
     p = _p2(pref_cd)
     d = os.path.join(cachedir, "a13", p)
     os.makedirs(d, exist_ok=True)
     shps = glob.glob(os.path.join(d, "**", "*.shp"), recursive=True)
     if shps:
-        return shps
+        if all(shp_intact(s) for s in shps):
+            return shps
+        # 切れた（破損）キャッシュ → 掃除して取り直す
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(d, exist_ok=True)
     zpath = os.path.join(d, f"A13_{p}.zip")
     errors = []
     for y in A13_YEARS:
