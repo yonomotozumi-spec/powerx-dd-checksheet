@@ -71,9 +71,10 @@ def _download(url, dest, timeout=45):
             f.write(chunk)
 
 
-def ensure_a13(pref_cd, cachedir):
-    """A13を都道府県単位でDL・展開し、.shpパス一覧を返す。年度は存在するものを順に試す。"""
-    from shp_fast import shp_intact
+def ensure_a13(pref_cd, cachedir, download=True):
+    """A13を都道府県単位でDL・展開し、.shpパス一覧を返す。年度は存在するものを順に試す。
+    download=False のときはダウンロードせず、未キャッシュなら DataNotReady を送出する。"""
+    from shp_fast import shp_intact, DataNotReady
     p = _p2(pref_cd)
     d = os.path.join(cachedir, "a13", p)
     os.makedirs(d, exist_ok=True)
@@ -84,6 +85,8 @@ def ensure_a13(pref_cd, cachedir):
         # 切れた（破損）キャッシュ → 掃除して取り直す
         shutil.rmtree(d, ignore_errors=True)
         os.makedirs(d, exist_ok=True)
+    if not download:
+        raise DataNotReady("A13 未キャッシュ: " + p)
     zpath = os.path.join(d, f"A13_{p}.zip")
     errors = []
     for y in A13_YEARS:
@@ -106,10 +109,11 @@ def ensure_a13(pref_cd, cachedir):
     raise RuntimeError("A13ダウンロード失敗（" + pref_cd + "）: " + " / ".join(errors))
 
 
-def judge_hoanrin(lat, lon, pref_cd, cachedir):
-    """戻り値: (value, comment, kinds)。kindsは点が含まれる森林地域区分名(str)のset。失敗時は例外。"""
+def judge_hoanrin(lat, lon, pref_cd, cachedir, cache_only=False):
+    """戻り値: (value, comment, kinds)。kindsは点が含まれる森林地域区分名(str)のset。
+    cache_only=True のときはダウンロードせず、未キャッシュなら DataNotReady を送出する。"""
     from shp_fast import load_index, point_hits  # bboxインデックス＋候補のみ厳密判定（全件走査を回避）
-    paths = ensure_a13(pref_cd, cachedir)
+    paths = ensure_a13(pref_cd, cachedir, download=not cache_only)
     names = set()
     for sp in paths:
         idx = load_index(sp, ("a13_001", "layer_no"))
