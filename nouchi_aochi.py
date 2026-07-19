@@ -8,7 +8,7 @@
 ※A12は2015年版・参考表示で精度保証なし。種別(1/2/3種)・確定は市町村農政課/農業委員会照会。
 依存: pyshp (import shapefile)
 """
-import os, glob, zipfile, urllib.request
+import os, glob, zipfile, shutil, urllib.request
 
 A12_URL = "https://nlftp.mlit.go.jp/ksj/gml/data/A12/A12-15/A12-15_{p}_GML.zip"
 
@@ -60,17 +60,21 @@ def _contains(lon, lat, geo):
 
 def ensure_a12(pref_cd, cachedir):
     """A12を都道府県単位でDL・展開し、.shpパス一覧を返す。"""
+    from shp_fast import shp_intact
     p = _p2(pref_cd)
     d = os.path.join(cachedir, "a12", p)
     os.makedirs(d, exist_ok=True)
     shps = glob.glob(os.path.join(d, "**", "*.shp"), recursive=True)
-    if not shps:
-        zpath = os.path.join(d, f"A12-15_{p}.zip")
-        urllib.request.urlretrieve(A12_URL.format(p=p), zpath)
-        with zipfile.ZipFile(zpath) as z:
-            z.extractall(d)
-        shps = glob.glob(os.path.join(d, "**", "*.shp"), recursive=True)
-    return shps
+    if shps and all(shp_intact(s) for s in shps):
+        return shps
+    if shps:  # 切れた（破損）キャッシュ → 掃除して取り直す
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(d, exist_ok=True)
+    zpath = os.path.join(d, f"A12-15_{p}.zip")
+    urllib.request.urlretrieve(A12_URL.format(p=p), zpath)
+    with zipfile.ZipFile(zpath) as z:
+        z.extractall(d)
+    return glob.glob(os.path.join(d, "**", "*.shp"), recursive=True)
 
 
 def judge_aochi(lat, lon, pref_cd, cachedir):
