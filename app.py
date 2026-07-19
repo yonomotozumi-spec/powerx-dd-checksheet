@@ -33,6 +33,37 @@ APP_USER = os.environ.get("APP_USER", "").strip()
 APP_PASS = os.environ.get("APP_PASS", "").strip()
 
 
+# ───────────────────────── プリウォーム ─────────────────────────
+# 環境変数 PREWARM_PREFS（例 "43,07,01"）に指定した都道府県のA12/A13を、
+# 起動直後にバックグラウンドで先読み＆索引化しておく。永続ディスクに残るので、
+# 指定県は「本当の初回リクエスト」から高速になる。起動自体はブロックしない。
+def _prewarm():
+    prefs = [p.strip().zfill(2) for p in os.environ.get("PREWARM_PREFS", "").split(",") if p.strip()]
+    if not prefs:
+        return
+    from nouchi_aochi import judge_aochi
+    from hoanrin import judge_hoanrin
+    lat, lon = 36.0, 138.0  # 日本内陸の適当な点。DL＋索引構築が目的で座標は結果に無関係。
+    print(f"[prewarm] start: {','.join(prefs)}", flush=True)
+    for pc in prefs:
+        for name, fn in (("A12", judge_aochi), ("A13", judge_hoanrin)):
+            try:
+                t0 = time.time()
+                fn(lat, lon, pc, DATA_DIR)
+                print(f"[prewarm] {name} {pc} ready in {time.time()-t0:.1f}s", flush=True)
+            except Exception as e:
+                print(f"[prewarm] {name} {pc} failed: {type(e).__name__}: {e}", flush=True)
+
+
+def _start_prewarm():
+    if os.environ.get("PREWARM_PREFS", "").strip():
+        import threading
+        threading.Thread(target=_prewarm, name="prewarm", daemon=True).start()
+
+
+_start_prewarm()
+
+
 def require_auth(fn):
     @wraps(fn)
     def wrapper(*a, **kw):
