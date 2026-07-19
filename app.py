@@ -469,18 +469,31 @@ def diag():
 
 @app.errorhandler(Exception)
 def on_error(e):
-    # 想定外の例外でも素の「Internal Server Error」ではなく、原因の見えるページを返す。
-    # 全文トレースバックはRenderのLogsに出す。404等の通常のHTTPエラーはそのまま通す。
+    # 想定外の例外でも素の「Internal Server Error」を出さない。
+    # ここは render() 等に一切依存せず、自前でHTMLを組み立てる（エラー処理が二重に
+    # 失敗して素の500になるのを防ぐ）。全文トレースバックはRenderのLogsへ。
     from werkzeug.exceptions import HTTPException
-    if isinstance(e, HTTPException):
+    from html import escape as _esc
+    # 404等の4xxはそのまま通す。5xx/一般例外は原因を表示する。
+    if isinstance(e, HTTPException) and (e.code or 500) < 500:
         return e
-    print("[error] unhandled exception:\n" + traceback.format_exc(), flush=True)
-    body = (f'<div class="note">⚠️ サーバ内部でエラーが発生しました：'
-            f'{type(e).__name__}: {str(e)[:300]}<br>'
-            f'再試行しても直らない場合は、この表示を管理者に伝えてください。</div>')
-    resp = render(body)
-    resp.status_code = 500
-    return resp
+    try:
+        print("[error] unhandled exception:\n" + traceback.format_exc(), flush=True)
+    except Exception:
+        pass
+    detail = _esc(f"{type(e).__name__}: {str(e)[:400]}")
+    page = (
+        "<!doctype html><html lang='ja'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>エラー</title></head>"
+        "<body style='font-family:-apple-system,Segoe UI,Meiryo,sans-serif;"
+        "max-width:720px;margin:48px auto;padding:0 16px;line-height:1.7;color:#16213d'>"
+        "<h2>⚠️ サーバ内部でエラーが発生しました</h2>"
+        "<p style='background:#fef8e0;border-radius:8px;padding:12px 14px'><code>" + detail + "</code></p>"
+        "<p>お手数ですが、この画面の文言を管理者にお伝えください。"
+        "<a href='/'>入力画面に戻る</a></p></body></html>"
+    )
+    return Response(page, status=500, mimetype="text/html; charset=utf-8")
 
 
 if __name__ == "__main__":
