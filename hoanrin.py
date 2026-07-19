@@ -103,23 +103,18 @@ def ensure_a13(pref_cd, cachedir):
 
 def judge_hoanrin(lat, lon, pref_cd, cachedir):
     """戻り値: (value, comment, kinds)。kindsは点が含まれる森林地域区分名(str)のset。失敗時は例外。"""
-    import shapefile  # pyshp
+    from shp_fast import load_index, point_hits  # bboxインデックス＋候補のみ厳密判定（全件走査を回避）
     paths = ensure_a13(pref_cd, cachedir)
     names = set()
     for sp in paths:
-        r = shapefile.Reader(sp, encoding="cp932", encodingErrors="replace")
-        flds = [f[0].lower() for f in r.fields[1:]]
-        idx = None
-        for cand in ("a13_001", "layer_no"):
-            if cand in flds:
-                idx = flds.index(cand); break
-        if idx is None:
-            continue
-        for sr in r.iterShapeRecords():
-            if _shape_contains(lon, lat, sr.shape):
-                try: code = int(sr.record[idx])
-                except Exception: continue
-                names.add(CODE.get(code) or f"区分{code}")
+        idx = load_index(sp, ("a13_001", "layer_no"))
+        for vals in point_hits(sp, idx, lon, lat):
+            code = next((v for v in vals if v is not None and str(v).strip() != ""), None)
+            if code is None:
+                continue
+            try: code = int(code)
+            except Exception: continue
+            names.add(CODE.get(code) or f"区分{code}")
     base_c = ("国土数値情報A13(森林地域)より1次判定。保安林内は立木伐採・土地形質変更に許可、"
               "開発には解除が必要な場合あり。指定範囲・可否は都道府県森林部局へ照会（A13は参考精度）")
     is_hoanrin = ("保安林" in names) or ("保安施設地区" in names)
