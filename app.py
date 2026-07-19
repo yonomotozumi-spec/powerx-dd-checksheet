@@ -11,7 +11,7 @@ PowerX 案件チェックシート 社内Webアプリ（Flask）。
 - 社内限定アクセス：環境変数 APP_USER / APP_PASS を設定すると Basic認証を要求する（未設定なら認証なし）。
 - Render 等の Python 対応ホストで `gunicorn app:app` として起動する想定。
 """
-import os, io, json, math, time, tempfile, datetime, urllib.parse, urllib.request, subprocess, traceback, types
+import os, io, json, math, time, tempfile, datetime, urllib.parse, urllib.request, subprocess, traceback, types, shutil
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from flask import Flask, request, send_file, Response, abort, redirect
@@ -395,6 +395,76 @@ def download(token):
 @app.route("/healthz")
 def healthz():
     return "ok"
+
+
+# ───────────────────────── 診断（ディスク永続性） ─────────────────────────
+# 起動ごとにブートマーカーを更新。永続ディスクなら再起動をまたいで boot_count が増え、
+# first_boot と cached データが残る。エフェメラルなら毎回 boot_count=1・cachedは空。
+def _boot_marker():
+    m = {"first_boot": None, "boot_count": 0}
+    path = os.path.join(DATA_DIR, ".boot_marker.json")
+    try:
+        if os.path.exists(path):
+            m = json.load(open(path, encoding="utf-8"))
+    except Exception:
+        pass
+    m["boot_count"] = int(m.get("boot_count", 0)) + 1
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    if not m.get("first_boot"):
+        m["first_boot"] = now
+    m["this_boot"] = now
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        json.dump(m, open(path, "w", encoding="utf-8"))
+    except Exception:
+        pass
+    return m
+
+
+_BOOT_MARKER = _boot_marker()
+
+
+def _diag_report():
+    rep = {"data_dir": DATA_DIR, "boot": _BOOT_MARKER}
+    # DATA_DIR が / と別デバイス＝専用マウント（＝永続ディスクの可能性大）。再起動不要の即判定。
+    try:
+        base = DATA_DIR
+        while base and not os.path.exists(base):
+            base = os.path.dirname(base)
+        rep["separate_mount"] = (os.stat(base or "/").st_dev != os.stat("/").st_dev)
+    except Exception as e:
+        rep["mount_error"] = str(e)
+    try:
+        du = shutil.disk_usage(DATA_DIR if os.path.isdir(DATA_DIR) else "/")
+        rep["disk_total_gb"] = round(du.total / 1e9, 2)
+        rep["disk_used_gb"] = round(du.used / 1e9, 2)
+        rep["disk_free_gb"] = round(du.free / 1e9, 2)
+    except Exception as e:
+        rep["disk_error"] = str(e)
+    try:
+        def _prefs(sub):
+            p = os.path.join(DATA_DIR, sub)
+            return sorted(d for d in os.listdir(p)) if os.path.isdir(p) else []
+        rep["cached_a12_prefs"] = _prefs("a12")
+        rep["cached_a13_prefs"] = _prefs("a13")
+        total = 0
+        for root, _dirs, files in os.walk(DATA_DIR):
+            for fn in files:
+                try: total += os.path.getsize(os.path.join(root, fn))
+                except OSError: pass
+        rep["data_dir_size_mb"] = round(total / 1e6, 1)
+    except Exception as e:
+        rep["cache_error"] = str(e)
+    rep["judge"] = ("separate_mount=true かつ 再起動後も boot_count が増え first_boot が不変で "
+                    "cached_* が残っていれば【永続】。boot_count が毎回1に戻り cached_* が空なら【非永続】。")
+    return rep
+
+
+@app.route("/diag")
+@require_auth
+def diag():
+    return Response(json.dumps(_diag_report(), ensure_ascii=False, indent=2),
+                    mimetype="application/json; charset=utf-8")
 
 
 @app.errorhandler(Exception)
