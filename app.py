@@ -13,7 +13,7 @@ PowerX 案件チェックシート 社内Webアプリ（Flask）。
 """
 import os, io, json, math, time, tempfile, datetime, urllib.parse, urllib.request, subprocess, traceback, types
 from functools import wraps
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from flask import Flask, request, send_file, Response, abort, redirect
 
 import reinfolib_judge
@@ -221,26 +221,42 @@ def generate(form):
             out["notes"].append(f"森林/保安林の自動判定はスキップしました（{type(e).__name__}: {str(e)[:200]}）。都道府県の森林GISで目視確認してください。")
         return out
 
+    # 各判定には時間予算を設ける。初回のA12/A13ダウンロード＋索引構築が重い県でも、
+    # 予算超過時はその判定だけ諦めて（バックグラウンドで継続＝次回はキャッシュで高速）
+    # リクエスト自体は必ず返す。これによりワーカーのタイムアウト(=502)を防ぐ。
+    JUDGE_BUDGET = float(os.environ.get("JUDGE_BUDGET_SEC", "70"))
     _tstart = time.time()
-    with ThreadPoolExecutor(max_workers=3) as ex:
+    deadline = _tstart + JUDGE_BUDGET
+    ex = ThreadPoolExecutor(max_workers=3)
+    try:
         f_rein = ex.submit(task_reinfolib)
         # 都道府県コードはreinfolib取得と並行して取得（農地・森林の判定に必要）
         try:
             pc = pref_code(lat, lon)
         except Exception:
             pc = None
-        f_nouchi = ex.submit(task_nouchi, pc) if pc else None
-        f_hoanrin = ex.submit(task_hoanrin, pc) if pc else None
-        results = [f_rein.result()]
-        if f_nouchi: results.append(f_nouchi.result())
-        if f_hoanrin: results.append(f_hoanrin.result())
-    if not pc:
-        notes.append("都道府県コードを特定できず、農地・森林の自動判定はスキップしました。地図で目視確認してください。")
-    for res in results:  # reinfolib→農地→森林 の順にマージ（キー衝突なし）
+        pending = [("reinfolib", f_rein)]
+        if pc:
+            pending.append(("農地(A12)", ex.submit(task_nouchi, pc)))
+            pending.append(("森林/保安林(A13)", ex.submit(task_hoanrin, pc)))
+        else:
+            notes.append("都道府県コードを特定できず、農地・森林の自動判定はスキップしました。地図で目視確認してください。")
+        results = []
+        for label, fut in pending:  # reinfolib→農地→森林 の順に回収
+            remaining = max(1.0, deadline - time.time())
+            try:
+                results.append(fut.result(timeout=remaining))
+            except FuturesTimeout:
+                print(f"[gen] {label} timed out (> {JUDGE_BUDGET:.0f}s), continuing", flush=True)
+                notes.append(f"{label}の自動判定は時間切れでスキップしました。初回のデータ取得に時間がかかっています——"
+                             f"バックグラウンドで準備を継続するので、数分後に同じ地点で再実行すると高速に判定できます。")
+    finally:
+        ex.shutdown(wait=False)  # 未完了スレッドは裏で継続（キャッシュを温める）。応答は待たせない。
+    for res in results:  # キー衝突なしなので順不同でも安全
         values_data["values"].update(res["values"])
         values_data["permits"].update(res["permits"])
         notes.extend(res["notes"])
-    print(f"[gen] judges done in {time.time()-_tstart:.1f}s (parallel)", flush=True)
+    print(f"[gen] judges gathered in {time.time()-_tstart:.1f}s", flush=True)
 
     # values.json 書き出し
     vpath = os.path.join(work, "values.json")
