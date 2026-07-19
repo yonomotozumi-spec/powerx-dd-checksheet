@@ -352,6 +352,13 @@ def main():
     ap.add_argument("--grid",default="",help="系統接続確認の回答JSON（任意）")
     ap.add_argument("--classic",action="store_true",help="元の3タブ（DD/許認可39/輸送）のみ生成。総合評価・系統接続確認タブを付けない")
     args=ap.parse_args()
+    run(args)
+    print("OK:",args.out)
+
+
+def run(args):
+    """argparse名前空間(または同等の属性を持つオブジェクト)を受け取りxlsxを生成する。
+    app.py からプロセス内で直接呼べるよう main() から分離した。"""
     items=dd_items(args.lat,args.lon,args.address,args.muni,args.pref)
     permit_ov={}
     if args.values and os.path.exists(args.values):
@@ -379,7 +386,8 @@ def main():
             grid_ov=json.load(open(args.grid,encoding="utf-8")).get("items",{})
         write_grid(wb.create_sheet("系統接続確認"),args.tso,args.pxno,grid_ov)
         write_summary(wb.create_sheet("総合評価",0),args,ws1.title,len(items))
-    wb.save(args.out); print("OK:",args.out)
+    wb.save(args.out)
+    return args.out
 
 if __name__=="__main__":
     main()

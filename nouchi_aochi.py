@@ -75,24 +75,20 @@ def ensure_a12(pref_cd, cachedir):
 
 def judge_aochi(lat, lon, pref_cd, cachedir):
     """戻り値: (value, comment)。失敗時は例外。"""
-    import shapefile  # pyshp
+    from shp_fast import load_index, point_hits  # bboxインデックス＋候補のみ厳密判定（全件走査を回避）
     paths = ensure_a12(pref_cd, cachedir)
     hit = set(); muni = ""
     pref_shps = [p for p in paths if os.path.basename(p)[:-4][-2:] in ("05", "06")]
     if pref_shps:
         paths = pref_shps
     for sp in paths:
-        r = shapefile.Reader(sp, encoding="cp932", encodingErrors="replace")
-        flds = [f[0].lower() for f in r.fields[1:]]
-        li = flds.index("layer_no") if "layer_no" in flds else None
-        ci = flds.index("ctv_name") if "ctv_name" in flds else None
-        for sr in r.iterShapeRecords():
-            if _shape_contains(lon, lat, sr.shape):
-                if li is not None:
-                    try: hit.add(int(sr.record[li]))
-                    except Exception: pass
-                if ci is not None and not muni:
-                    muni = str(sr.record[ci] or "")
+        idx = load_index(sp, ("layer_no", "ctv_name"))
+        for (ln, cn) in point_hits(sp, idx, lon, lat):
+            if ln is not None:
+                try: hit.add(int(ln))
+                except Exception: pass
+            if cn and not muni:
+                muni = str(cn)
     base_c = "国土数値情報A12(2015)より1次判定。種別(1/2/3種)・最終確定は市町村農政課/農業委員会へ照会"
     if 6 in hit:
         return ("青地（農用地区域内）" + (f"／{muni}" if muni else ""), base_c)

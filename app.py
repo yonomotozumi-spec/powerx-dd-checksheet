@@ -11,7 +11,7 @@ PowerX 案件チェックシート 社内Webアプリ（Flask）。
 - 社内限定アクセス：環境変数 APP_USER / APP_PASS を設定すると Basic認証を要求する（未設定なら認証なし）。
 - Render 等の Python 対応ホストで `gunicorn app:app` として起動する想定。
 """
-import os, io, json, math, time, tempfile, datetime, urllib.parse, urllib.request, subprocess, traceback
+import os, io, json, math, time, tempfile, datetime, urllib.parse, urllib.request, subprocess, traceback, types
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, send_file, Response, abort, redirect
@@ -135,73 +135,100 @@ def generate(form):
     work = tempfile.mkdtemp(prefix="pxjob_", dir=OUT_DIR)
     values_data = {"values": {}, "permits": {}}
 
-    # reinfolib 自動判定
-    if key:
-        rdir = os.path.join(work, "reinfolib")
-        got = fetch_reinfolib(lat, lon, key, rdir)
-        if got:
-            res = reinfolib_judge.judge(lat, lon, rdir)
-            values_data["values"].update(res.get("values", {}))
-            values_data["permits"].update(res.get("permits", {}))
-            notes.append(f"reinfolibから{got}レイヤを取得し自動判定しました。")
-        else:
-            notes.append("reinfolibの取得に失敗しました（APIキー・ネットワークを確認）。自動判定はスキップします。")
-    else:
-        notes.append("APIキーが未設定のため、reinfolib自動判定はスキップ（各確認リンクは生成されます）。")
+    # reinfolib / 農地A12 / 森林A13 の判定は互いに独立なので並列実行して総時間を短縮する。
+    # 各タスクは {"values","permits","notes"} を返し、本体で決まった順にマージする。
+    def task_reinfolib():
+        out = {"values": {}, "permits": {}, "notes": []}
+        if not key:
+            out["notes"].append("APIキーが未設定のため、reinfolib自動判定はスキップ（各確認リンクは生成されます）。")
+            return out
+        try:
+            rdir = os.path.join(work, "reinfolib")
+            got = fetch_reinfolib(lat, lon, key, rdir)
+            if got:
+                res = reinfolib_judge.judge(lat, lon, rdir)
+                out["values"].update(res.get("values", {}))
+                out["permits"].update(res.get("permits", {}))
+                out["notes"].append(f"reinfolibから{got}レイヤを取得し自動判定しました。")
+            else:
+                out["notes"].append("reinfolibの取得に失敗しました（APIキー・ネットワークを確認）。自動判定はスキップします。")
+        except Exception as e:
+            out["notes"].append(f"reinfolib自動判定はスキップしました（{type(e).__name__}）。")
+        return out
 
-    # 都道府県コード（農地A12・森林A13の判定に使用）
-    try:
-        pc = pref_code(lat, lon)
-    except Exception:
-        pc = None
-
-    # 農地 青地/白地（A12）
-    try:
-        if pc:
+    def task_nouchi(pcode):
+        out = {"values": {}, "permits": {}, "notes": []}
+        try:
             from nouchi_aochi import judge_aochi
-            val, cmt = judge_aochi(lat, lon, pc, DATA_DIR)
-            values_data["values"]["11"] = {"value": val, "comment": cmt}
-            notes.append(f"農地(青地/白地)をA12から1次判定：{val}")
-    except Exception as e:
-        notes.append(f"農地(青地/白地)の自動判定はスキップしました（{type(e).__name__}）。地図で目視確認してください。")
+            t0 = time.time()
+            val, cmt = judge_aochi(lat, lon, pcode, DATA_DIR)
+            print(f"[gen] A12 judge done in {time.time()-t0:.1f}s: {val}", flush=True)
+            out["values"]["11"] = {"value": val, "comment": cmt}
+            out["notes"].append(f"農地(青地/白地)をA12から1次判定：{val}")
+        except Exception as e:
+            print(f"[gen] A12 judge failed: {type(e).__name__}: {e}", flush=True)
+            out["notes"].append(f"農地(青地/白地)の自動判定はスキップしました（{type(e).__name__}）。地図で目視確認してください。")
+        return out
 
-    # 森林地域／保安林（A13）
-    try:
-        if pc:
+    def task_hoanrin(pcode):
+        out = {"values": {}, "permits": {}, "notes": []}
+        try:
             from hoanrin import judge_hoanrin
-            print(f"[gen] A13 judge start pref={pc}", flush=True)
-            _t0 = time.time()
-            val, cmt, kinds = judge_hoanrin(lat, lon, pc, DATA_DIR)
-            print(f"[gen] A13 judge done in {time.time()-_t0:.1f}s: {val}", flush=True)
-            values_data["values"]["12"] = {"value": val, "comment": cmt}
-            # 保安林・保安施設地区→森林法の保安林手続、地域森林計画対象民有林→伐採届出/林地開発許可
+            t0 = time.time()
+            val, cmt, kinds = judge_hoanrin(lat, lon, pcode, DATA_DIR)
+            print(f"[gen] A13 judge done in {time.time()-t0:.1f}s: {val}", flush=True)
+            out["values"]["12"] = {"value": val, "comment": cmt}
             if ("保安林" in kinds) or ("保安施設地区" in kinds):
-                values_data["permits"]["34"] = {"req": "要",
+                out["permits"]["34"] = {"req": "要",
                     "note": "保安林に該当 (国土数値情報A13)。立木伐採・土地形質変更には許可、開発には解除が必要な場合あり"}
             if "地域森林計画対象民有林" in kinds:
-                values_data["permits"].setdefault("33", {"req": "要",
-                    "note": "地域森林計画対象民有林に該当 (A13)。1ha超開発は林地開発許可、伐採は届出"})
-            notes.append(f"森林地域/保安林をA13から1次判定：{val}")
-    except Exception as e:
-        print(f"[gen] A13 judge failed: {type(e).__name__}: {e}", flush=True)
-        notes.append(f"森林/保安林の自動判定はスキップしました（{type(e).__name__}: {str(e)[:200]}）。都道府県の森林GISで目視確認してください。")
+                out["permits"]["33"] = {"req": "要",
+                    "note": "地域森林計画対象民有林に該当 (A13)。1ha超開発は林地開発許可、伐採は届出"}
+            out["notes"].append(f"森林地域/保安林をA13から1次判定：{val}")
+        except Exception as e:
+            print(f"[gen] A13 judge failed: {type(e).__name__}: {e}", flush=True)
+            out["notes"].append(f"森林/保安林の自動判定はスキップしました（{type(e).__name__}: {str(e)[:200]}）。都道府県の森林GISで目視確認してください。")
+        return out
+
+    _tstart = time.time()
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        f_rein = ex.submit(task_reinfolib)
+        # 都道府県コードはreinfolib取得と並行して取得（農地・森林の判定に必要）
+        try:
+            pc = pref_code(lat, lon)
+        except Exception:
+            pc = None
+        f_nouchi = ex.submit(task_nouchi, pc) if pc else None
+        f_hoanrin = ex.submit(task_hoanrin, pc) if pc else None
+        results = [f_rein.result()]
+        if f_nouchi: results.append(f_nouchi.result())
+        if f_hoanrin: results.append(f_hoanrin.result())
+    if not pc:
+        notes.append("都道府県コードを特定できず、農地・森林の自動判定はスキップしました。地図で目視確認してください。")
+    for res in results:  # reinfolib→農地→森林 の順にマージ（キー衝突なし）
+        values_data["values"].update(res["values"])
+        values_data["permits"].update(res["permits"])
+        notes.extend(res["notes"])
+    print(f"[gen] judges done in {time.time()-_tstart:.1f}s (parallel)", flush=True)
 
     # values.json 書き出し
     vpath = os.path.join(work, "values.json")
     with open(vpath, "w", encoding="utf-8") as f:
         json.dump(values_data, f, ensure_ascii=False, indent=2)
 
-    # xlsx 生成
+    # xlsx 生成（プロセス内で実行。毎回のPython起動＋ライブラリ再importの開銷を排除）
     safe = "".join(c for c in (addr[:20]) if c not in '[]:*?/\\')
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     out = os.path.join(work, f"PX案件チェックシート_{safe}_{stamp}.xlsx")
-    cmd = ["python", os.path.join(BASEDIR, "build_px_checksheet.py"),
-           "--address", addr, "--lat", str(lat), "--lon", str(lon),
-           "--pxno", pxno, "--tanto", tanto, "--values", vpath, "--out", out,
-           "--classic"]
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0 or not os.path.exists(out):
-        raise RuntimeError("xlsx生成に失敗しました：" + (r.stderr or r.stdout)[-500:])
+    import build_px_checksheet
+    bargs = types.SimpleNamespace(address=addr, lat=lat, lon=lon, muni="", pref="",
+                                  pxno=pxno, tanto=tanto, values=vpath, out=out,
+                                  tso="", grid="", classic=True)
+    _t0 = time.time()
+    build_px_checksheet.run(bargs)
+    print(f"[gen] xlsx built in {time.time()-_t0:.1f}s", flush=True)
+    if not os.path.exists(out):
+        raise RuntimeError("xlsx生成に失敗しました")
 
     return out, coord_source, notes
 
