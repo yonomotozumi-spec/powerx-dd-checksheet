@@ -11,12 +11,13 @@ PowerX 案件チェックシート 社内Webアプリ（Flask）。
 - 社内限定アクセス：環境変数 APP_USER / APP_PASS を設定すると Basic認証を要求する（未設定なら認証なし）。
 - Render 等の Python 対応ホストで `gunicorn app:app` として起動する想定。
 """
-import os, io, json, math, time, tempfile, datetime, urllib.parse, urllib.request, subprocess, traceback, types, shutil
+import os, io, json, math, time, tempfile, datetime, urllib.parse, urllib.request, subprocess, traceback, types, shutil, threading, queue
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from flask import Flask, request, send_file, Response, abort, redirect
 
 import reinfolib_judge
+from shp_fast import DataNotReady
 
 app = Flask(__name__)
 
@@ -33,35 +34,52 @@ APP_USER = os.environ.get("APP_USER", "").strip()
 APP_PASS = os.environ.get("APP_PASS", "").strip()
 
 
-# ───────────────────────── プリウォーム ─────────────────────────
-# 環境変数 PREWARM_PREFS（例 "43,07,01"）に指定した都道府県のA12/A13を、
-# 起動直後にバックグラウンドで先読み＆索引化しておく。永続ディスクに残るので、
-# 指定県は「本当の初回リクエスト」から高速になる。起動自体はブロックしない。
-def _prewarm():
-    prefs = [p.strip().zfill(2) for p in os.environ.get("PREWARM_PREFS", "").split(",") if p.strip()]
-    if not prefs:
-        return
-    from nouchi_aochi import judge_aochi
-    from hoanrin import judge_hoanrin
-    lat, lon = 36.0, 138.0  # 日本内陸の適当な点。DL＋索引構築が目的で座標は結果に無関係。
-    print(f"[prewarm] start: {','.join(prefs)}", flush=True)
-    for pc in prefs:
-        for name, fn in (("A12", judge_aochi), ("A13", judge_hoanrin)):
-            try:
-                t0 = time.time()
-                fn(lat, lon, pc, DATA_DIR)
-                print(f"[prewarm] {name} {pc} ready in {time.time()-t0:.1f}s", flush=True)
-            except Exception as e:
-                print(f"[prewarm] {name} {pc} failed: {type(e).__name__}: {e}", flush=True)
+# ─────────────── バックグラウンド・ウォーム（重い初回処理をリクエスト外＆直列で） ───────────────
+# 重いDL＋索引構築を「リクエストの中」でやると、無料枠(CPU弱/RAM512MB/timeout)で
+# ワーカーごと落ち、初回が必ずエラーになる。そこで:
+#  (1) リクエストは cache_only で軽く返し、未キャッシュ県はここへ積むだけ、
+#  (2) ウォームは専用ワーカー1本で「1データセットずつ直列」に実行し、
+#      複数の大容量県を同時展開してメモリ超過する事故を防ぐ。
+_warm_q = queue.Queue()
+_warm_seen = set()
+_warm_lock = threading.Lock()
 
 
-def _start_prewarm():
-    if os.environ.get("PREWARM_PREFS", "").strip():
-        import threading
-        threading.Thread(target=_prewarm, name="prewarm", daemon=True).start()
+def _enqueue_warm(kind, pc):
+    key = (kind, str(pc).zfill(2))
+    with _warm_lock:
+        if key in _warm_seen:
+            return
+        _warm_seen.add(key)
+    _warm_q.put(key)
 
 
-_start_prewarm()
+def _warm_worker():
+    while True:
+        kind, pc = _warm_q.get()
+        try:
+            t0 = time.time()
+            if kind == "a12":
+                from nouchi_aochi import judge_aochi
+                judge_aochi(36.0, 138.0, pc, DATA_DIR)   # download=True でキャッシュを作る
+            else:
+                from hoanrin import judge_hoanrin
+                judge_hoanrin(36.0, 138.0, pc, DATA_DIR)
+            print(f"[warm] {kind} {pc} ready in {time.time()-t0:.1f}s", flush=True)
+        except Exception as e:
+            print(f"[warm] {kind} {pc} failed: {type(e).__name__}: {e}", flush=True)
+        finally:
+            with _warm_lock:
+                _warm_seen.discard((kind, pc))
+            _warm_q.task_done()
+
+
+threading.Thread(target=_warm_worker, name="warm", daemon=True).start()
+
+# 起動時プリウォーム（PREWARM_PREFS）も同じ直列キューに積む
+for _pc in [p.strip().zfill(2) for p in os.environ.get("PREWARM_PREFS", "").split(",") if p.strip()]:
+    _enqueue_warm("a12", _pc)
+    _enqueue_warm("a13", _pc)
 
 
 def require_auth(fn):
@@ -189,13 +207,15 @@ def generate(form):
 
     def task_nouchi(pcode):
         out = {"values": {}, "permits": {}, "notes": []}
+        # cache_only: リクエスト内ではダウンロードしない。未キャッシュなら準備をキューに積む。
         try:
             from nouchi_aochi import judge_aochi
-            t0 = time.time()
-            val, cmt = judge_aochi(lat, lon, pcode, DATA_DIR)
-            print(f"[gen] A12 judge done in {time.time()-t0:.1f}s: {val}", flush=True)
+            val, cmt = judge_aochi(lat, lon, pcode, DATA_DIR, cache_only=True)
             out["values"]["11"] = {"value": val, "comment": cmt}
             out["notes"].append(f"農地(青地/白地)をA12から1次判定：{val}")
+        except DataNotReady:
+            _enqueue_warm("a12", pcode)
+            out["notes"].append("農地(青地/白地)データを準備中です（この地域は初回のみ）。1〜数分後に同じ地点で再実行すると自動判定されます。")
         except Exception as e:
             print(f"[gen] A12 judge failed: {type(e).__name__}: {e}", flush=True)
             out["notes"].append(f"農地(青地/白地)の自動判定はスキップしました（{type(e).__name__}）。地図で目視確認してください。")
@@ -205,9 +225,7 @@ def generate(form):
         out = {"values": {}, "permits": {}, "notes": []}
         try:
             from hoanrin import judge_hoanrin
-            t0 = time.time()
-            val, cmt, kinds = judge_hoanrin(lat, lon, pcode, DATA_DIR)
-            print(f"[gen] A13 judge done in {time.time()-t0:.1f}s: {val}", flush=True)
+            val, cmt, kinds = judge_hoanrin(lat, lon, pcode, DATA_DIR, cache_only=True)
             out["values"]["12"] = {"value": val, "comment": cmt}
             if ("保安林" in kinds) or ("保安施設地区" in kinds):
                 out["permits"]["34"] = {"req": "要",
@@ -216,6 +234,9 @@ def generate(form):
                 out["permits"]["33"] = {"req": "要",
                     "note": "地域森林計画対象民有林に該当 (A13)。1ha超開発は林地開発許可、伐採は届出"}
             out["notes"].append(f"森林地域/保安林をA13から1次判定：{val}")
+        except DataNotReady:
+            _enqueue_warm("a13", pcode)
+            out["notes"].append("森林/保安林データを準備中です（この地域は初回のみ）。1〜数分後に同じ地点で再実行すると自動判定されます。")
         except Exception as e:
             print(f"[gen] A13 judge failed: {type(e).__name__}: {e}", flush=True)
             out["notes"].append(f"森林/保安林の自動判定はスキップしました（{type(e).__name__}: {str(e)[:200]}）。都道府県の森林GISで目視確認してください。")

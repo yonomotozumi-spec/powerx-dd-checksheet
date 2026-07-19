@@ -58,9 +58,10 @@ def _contains(lon, lat, geo):
     return False
 
 
-def ensure_a12(pref_cd, cachedir):
-    """A12を都道府県単位でDL・展開し、.shpパス一覧を返す。"""
-    from shp_fast import shp_intact
+def ensure_a12(pref_cd, cachedir, download=True):
+    """A12を都道府県単位でDL・展開し、.shpパス一覧を返す。
+    download=False のときはダウンロードせず、未キャッシュなら DataNotReady を送出する。"""
+    from shp_fast import shp_intact, DataNotReady
     p = _p2(pref_cd)
     d = os.path.join(cachedir, "a12", p)
     os.makedirs(d, exist_ok=True)
@@ -70,6 +71,8 @@ def ensure_a12(pref_cd, cachedir):
     if shps:  # 切れた（破損）キャッシュ → 掃除して取り直す
         shutil.rmtree(d, ignore_errors=True)
         os.makedirs(d, exist_ok=True)
+    if not download:
+        raise DataNotReady("A12 未キャッシュ: " + p)
     zpath = os.path.join(d, f"A12-15_{p}.zip")
     urllib.request.urlretrieve(A12_URL.format(p=p), zpath)
     with zipfile.ZipFile(zpath) as z:
@@ -77,10 +80,11 @@ def ensure_a12(pref_cd, cachedir):
     return glob.glob(os.path.join(d, "**", "*.shp"), recursive=True)
 
 
-def judge_aochi(lat, lon, pref_cd, cachedir):
-    """戻り値: (value, comment)。失敗時は例外。"""
+def judge_aochi(lat, lon, pref_cd, cachedir, cache_only=False):
+    """戻り値: (value, comment)。cache_only=True のときはダウンロードせず、
+    未キャッシュなら DataNotReady を送出する。"""
     from shp_fast import load_index, point_hits  # bboxインデックス＋候補のみ厳密判定（全件走査を回避）
-    paths = ensure_a12(pref_cd, cachedir)
+    paths = ensure_a12(pref_cd, cachedir, download=not cache_only)
     hit = set(); muni = ""
     pref_shps = [p for p in paths if os.path.basename(p)[:-4][-2:] in ("05", "06")]
     if pref_shps:
