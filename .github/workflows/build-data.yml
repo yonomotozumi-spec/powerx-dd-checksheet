@@ -1,0 +1,44 @@
+name: Build KSJ data (A12/A13)
+
+# 国土数値情報から全47県のA12(農地)/A13(森林)を取得し、簡略化・圧縮して
+# data/ にコミットするワークフロー。アプリは実行時DLせず同梱データを読むだけになる。
+# 手動実行(workflow_dispatch)のほか、このワークフロー/生成スクリプトを変更した
+# push でも自動実行される。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-data.yml"
+      - "scripts/build_ksj_data.sh"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-ksj-data
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build A12/A13 bundled data
+        run: bash scripts/build_ksj_data.sh
+      - name: Commit generated data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/a12 data/a13
+          if git diff --cached --quiet; then
+            echo "no changes"
+          else
+            git commit -m "A12/A13 同梱データを自動生成 (KSJ, 簡略化+gzip)"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi

@@ -26,12 +26,11 @@
    | `REINFOLIB_API_KEY` | 推奨 | 社内共有のreinfolib APIキー。設定すると利用者はキー入力不要で自動判定が有効になる |
    | `APP_USER` | 任意 | Basic認証のユーザー名（社内限定にする場合） |
    | `APP_PASS` | 任意 | Basic認証のパスワード（`APP_USER`とセットで有効） |
-   | `PREWARM_PREFS` | 任意 | 先読みする都道府県コード（カンマ区切り、例 `43,07,01`）。設定すると起動後にバックグラウンドでA12/A13を取得・索引化し、その県は**初回リクエストから高速**になる。空なら無効 |
 
 5. **Create Web Service** → 数分でビルド完了 → `https://<名前>.onrender.com` で社内公開
 
 > APIキーやパスワードは**コードに書かず、必ずRenderの環境変数（Environment）に設定**してください。
-> `render.yaml` は農地(A12)・森林(A13)キャッシュ用の永続ディスク（1GB, `/var/data`）を定義しています。
+> 農地(A12)・森林(A13)の判定データは**リポジトリ同梱**（`data/*.geojson.gz`、GitHub Actionsで全47県を自動生成）。実行時のダウンロードは無く、無料プラン（永続ディスク無し）でも初回から高速・安定です。
 > 無料プランは一定時間アクセスがないとスリープし、次アクセス時に数十秒かけて起動します。
 
 ## ローカルでの起動（開発・確認用）
@@ -49,8 +48,8 @@ python app.py            # http://127.0.0.1:8765
 |---|---|
 | `app.py` | Flaskアプリ本体（フォーム・Basic認証・ネット取得・生成のオーケストレーション） |
 | `reinfolib_judge.py` | reinfolib GeoJSONのタイル計算・点内判定・値/許認可の組み立て |
-| `nouchi_aochi.py` | 国土数値情報A12から農地の青地/白地を点内判定（都道府県shapefileをDL・キャッシュ） |
-| `hoanrin.py` | 国土数値情報A13から森林地域区分/保安林を点内判定（都道府県shapefileをDL・キャッシュ） |
+| `geojudge.py` | 同梱データ(`data/a12`,`data/a13`)による農地/森林・保安林の点内判定（実行時DLなし） |
+| `scripts/build_ksj_data.sh` + `.github/workflows/build-data.yml` | 国土数値情報から全47県の同梱データを自動生成（GitHub Actions） |
 | `build_px_checksheet.py` | xlsx生成（`--classic`で元の3タブ。系統接続タブ等の拡張も内包） |
 | `render.yaml` / `Procfile` / `requirements.txt` / `runtime.txt` | Renderデプロイ設定 |
 

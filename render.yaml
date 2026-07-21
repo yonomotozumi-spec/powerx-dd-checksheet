@@ -7,13 +7,6 @@ services:
     startCommand: gunicorn app:app --timeout 300 --workers 1 --threads 2 --worker-class gthread
     healthCheckPath: /healthz
     envVars:
-      - key: DATA_DIR
-        value: /var/data/pxapp
-      # プリウォーム対象の都道府県コード(カンマ区切り、例 "43,07,01")。設定すると起動後に
-      # バックグラウンドで先読みキャッシュし、その県は初回リクエストから高速になる。空なら無効。
-      # Renderダッシュボードでいつでも変更可（変更→再デプロイで反映）。
-      - key: PREWARM_PREFS
-        value: ""
       # 社内共有のreinfolib APIキー。Renderダッシュボードで値を設定（sync:falseで秘匿）
       - key: REINFOLIB_API_KEY
         sync: false
@@ -22,7 +15,5 @@ services:
         sync: false
       - key: APP_PASS
         sync: false
-    disk:
-      name: a12-cache
-      mountPath: /var/data
-      sizeGB: 1
+    # 注: 判定データ(A12/A13)はリポジトリ同梱(data/*.geojson.gz)のため、
+    # 永続ディスクは不要（無料プランでは元々使えない）。
