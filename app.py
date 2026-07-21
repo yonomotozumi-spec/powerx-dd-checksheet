@@ -11,13 +11,13 @@ PowerX 案件チェックシート 社内Webアプリ（Flask）。
 - 社内限定アクセス：環境変数 APP_USER / APP_PASS を設定すると Basic認証を要求する（未設定なら認証なし）。
 - Render 等の Python 対応ホストで `gunicorn app:app` として起動する想定。
 """
-import os, io, json, math, time, tempfile, datetime, urllib.parse, urllib.request, subprocess, traceback, types, shutil, threading, queue
+import os, io, json, math, time, tempfile, datetime, urllib.parse, urllib.request, subprocess, traceback, types, shutil
 from functools import wraps
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, send_file, Response, abort, redirect
 
 import reinfolib_judge
-from shp_fast import DataNotReady
+import geojudge  # 同梱データ(gzip GeoJSON)で農地A12・森林A13を判定（実行時DLなし）
 
 app = Flask(__name__)
 
@@ -34,52 +34,9 @@ APP_USER = os.environ.get("APP_USER", "").strip()
 APP_PASS = os.environ.get("APP_PASS", "").strip()
 
 
-# ─────────────── バックグラウンド・ウォーム（重い初回処理をリクエスト外＆直列で） ───────────────
-# 重いDL＋索引構築を「リクエストの中」でやると、無料枠(CPU弱/RAM512MB/timeout)で
-# ワーカーごと落ち、初回が必ずエラーになる。そこで:
-#  (1) リクエストは cache_only で軽く返し、未キャッシュ県はここへ積むだけ、
-#  (2) ウォームは専用ワーカー1本で「1データセットずつ直列」に実行し、
-#      複数の大容量県を同時展開してメモリ超過する事故を防ぐ。
-_warm_q = queue.Queue()
-_warm_seen = set()
-_warm_lock = threading.Lock()
-
-
-def _enqueue_warm(kind, pc):
-    key = (kind, str(pc).zfill(2))
-    with _warm_lock:
-        if key in _warm_seen:
-            return
-        _warm_seen.add(key)
-    _warm_q.put(key)
-
-
-def _warm_worker():
-    while True:
-        kind, pc = _warm_q.get()
-        try:
-            t0 = time.time()
-            if kind == "a12":
-                from nouchi_aochi import judge_aochi
-                judge_aochi(36.0, 138.0, pc, DATA_DIR)   # download=True でキャッシュを作る
-            else:
-                from hoanrin import judge_hoanrin
-                judge_hoanrin(36.0, 138.0, pc, DATA_DIR)
-            print(f"[warm] {kind} {pc} ready in {time.time()-t0:.1f}s", flush=True)
-        except Exception as e:
-            print(f"[warm] {kind} {pc} failed: {type(e).__name__}: {e}", flush=True)
-        finally:
-            with _warm_lock:
-                _warm_seen.discard((kind, pc))
-            _warm_q.task_done()
-
-
-threading.Thread(target=_warm_worker, name="warm", daemon=True).start()
-
-# 起動時プリウォーム（PREWARM_PREFS）も同じ直列キューに積む
-for _pc in [p.strip().zfill(2) for p in os.environ.get("PREWARM_PREFS", "").split(",") if p.strip()]:
-    _enqueue_warm("a12", _pc)
-    _enqueue_warm("a13", _pc)
+# 判定データ(A12農地/A13森林)はリポジトリ同梱の gzip GeoJSON を geojudge が読む。
+# 実行時ダウンロード・キャッシュ・プリウォームは廃止（無料枠は永続ディスク非対応のため
+# 同梱方式が最も速く安定）。
 
 
 def require_auth(fn):
@@ -184,8 +141,7 @@ def generate(form):
     work = tempfile.mkdtemp(prefix="pxjob_", dir=OUT_DIR)
     values_data = {"values": {}, "permits": {}}
 
-    # reinfolib / 農地A12 / 森林A13 の判定は互いに独立なので並列実行して総時間を短縮する。
-    # 各タスクは {"values","permits","notes"} を返し、本体で決まった順にマージする。
+    # reinfolib（ネットワーク）だけ別スレッドで取得し、その間に都道府県コードを取得する。
     def task_reinfolib():
         out = {"values": {}, "permits": {}, "notes": []}
         if not key:
@@ -205,79 +161,49 @@ def generate(form):
             out["notes"].append(f"reinfolib自動判定はスキップしました（{type(e).__name__}）。")
         return out
 
-    def task_nouchi(pcode):
-        out = {"values": {}, "permits": {}, "notes": []}
-        # cache_only: リクエスト内ではダウンロードしない。未キャッシュなら準備をキューに積む。
-        try:
-            from nouchi_aochi import judge_aochi
-            val, cmt = judge_aochi(lat, lon, pcode, DATA_DIR, cache_only=True)
-            out["values"]["11"] = {"value": val, "comment": cmt}
-            out["notes"].append(f"農地(青地/白地)をA12から1次判定：{val}")
-        except DataNotReady:
-            _enqueue_warm("a12", pcode)
-            out["notes"].append("農地(青地/白地)データを準備中です（この地域は初回のみ）。1〜数分後に同じ地点で再実行すると自動判定されます。")
-        except Exception as e:
-            print(f"[gen] A12 judge failed: {type(e).__name__}: {e}", flush=True)
-            out["notes"].append(f"農地(青地/白地)の自動判定はスキップしました（{type(e).__name__}）。地図で目視確認してください。")
-        return out
-
-    def task_hoanrin(pcode):
-        out = {"values": {}, "permits": {}, "notes": []}
-        try:
-            from hoanrin import judge_hoanrin
-            val, cmt, kinds = judge_hoanrin(lat, lon, pcode, DATA_DIR, cache_only=True)
-            out["values"]["12"] = {"value": val, "comment": cmt}
-            if ("保安林" in kinds) or ("保安施設地区" in kinds):
-                out["permits"]["34"] = {"req": "要",
-                    "note": "保安林に該当 (国土数値情報A13)。立木伐採・土地形質変更には許可、開発には解除が必要な場合あり"}
-            if "地域森林計画対象民有林" in kinds:
-                out["permits"]["33"] = {"req": "要",
-                    "note": "地域森林計画対象民有林に該当 (A13)。1ha超開発は林地開発許可、伐採は届出"}
-            out["notes"].append(f"森林地域/保安林をA13から1次判定：{val}")
-        except DataNotReady:
-            _enqueue_warm("a13", pcode)
-            out["notes"].append("森林/保安林データを準備中です（この地域は初回のみ）。1〜数分後に同じ地点で再実行すると自動判定されます。")
-        except Exception as e:
-            print(f"[gen] A13 judge failed: {type(e).__name__}: {e}", flush=True)
-            out["notes"].append(f"森林/保安林の自動判定はスキップしました（{type(e).__name__}: {str(e)[:200]}）。都道府県の森林GISで目視確認してください。")
-        return out
-
-    # 各判定には時間予算を設ける。初回のA12/A13ダウンロード＋索引構築が重い県でも、
-    # 予算超過時はその判定だけ諦めて（バックグラウンドで継続＝次回はキャッシュで高速）
-    # リクエスト自体は必ず返す。これによりワーカーのタイムアウト(=502)を防ぐ。
-    JUDGE_BUDGET = float(os.environ.get("JUDGE_BUDGET_SEC", "70"))
-    _tstart = time.time()
-    deadline = _tstart + JUDGE_BUDGET
-    ex = ThreadPoolExecutor(max_workers=3)
-    try:
+    _t0 = time.time()
+    with ThreadPoolExecutor(max_workers=1) as ex:
         f_rein = ex.submit(task_reinfolib)
-        # 都道府県コードはreinfolib取得と並行して取得（農地・森林の判定に必要）
         try:
             pc = pref_code(lat, lon)
         except Exception:
             pc = None
-        pending = [("reinfolib", f_rein)]
-        if pc:
-            pending.append(("農地(A12)", ex.submit(task_nouchi, pc)))
-            pending.append(("森林/保安林(A13)", ex.submit(task_hoanrin, pc)))
-        else:
-            notes.append("都道府県コードを特定できず、農地・森林の自動判定はスキップしました。地図で目視確認してください。")
-        results = []
-        for label, fut in pending:  # reinfolib→農地→森林 の順に回収
-            remaining = max(1.0, deadline - time.time())
-            try:
-                results.append(fut.result(timeout=remaining))
-            except FuturesTimeout:
-                print(f"[gen] {label} timed out (> {JUDGE_BUDGET:.0f}s), continuing", flush=True)
-                notes.append(f"{label}の自動判定は時間切れでスキップしました。初回のデータ取得に時間がかかっています——"
-                             f"バックグラウンドで準備を継続するので、数分後に同じ地点で再実行すると高速に判定できます。")
-    finally:
-        ex.shutdown(wait=False)  # 未完了スレッドは裏で継続（キャッシュを温める）。応答は待たせない。
-    for res in results:  # キー衝突なしなので順不同でも安全
-        values_data["values"].update(res["values"])
-        values_data["permits"].update(res["permits"])
-        notes.extend(res["notes"])
-    print(f"[gen] judges gathered in {time.time()-_tstart:.1f}s", flush=True)
+        rein = f_rein.result()
+    values_data["values"].update(rein["values"])
+    values_data["permits"].update(rein["permits"])
+    notes.extend(rein["notes"])
+
+    # 農地A12・森林A13は「同梱データ(gzip GeoJSON)」で即判定。実行時ダウンロードは一切しない。
+    if pc:
+        try:
+            val, cmt = geojudge.judge_aochi(lat, lon, pc)
+            if val is None:
+                notes.append(f"農地(青地/白地)データが未整備です（コード{pc}）。地図で目視確認してください。")
+            else:
+                values_data["values"]["11"] = {"value": val, "comment": cmt}
+                notes.append(f"農地(青地/白地)をA12から1次判定：{val}")
+        except Exception as e:
+            print(f"[gen] A12 judge error: {type(e).__name__}: {e}", flush=True)
+            notes.append(f"農地(青地/白地)の判定でエラー（{type(e).__name__}）。地図で目視確認してください。")
+        try:
+            val, cmt, kinds = geojudge.judge_hoanrin(lat, lon, pc)
+            if kinds is None:
+                notes.append(f"森林/保安林データが未整備です（コード{pc}）。都道府県の森林GISで目視確認してください。")
+            else:
+                values_data["values"]["12"] = {"value": val, "comment": cmt}
+                if ("保安林" in kinds) or ("保安施設地区" in kinds):
+                    values_data["permits"]["34"] = {"req": "要",
+                        "note": "保安林に該当 (国土数値情報A13)。立木伐採・土地形質変更には許可、開発には解除が必要な場合あり"}
+                if "地域森林計画対象民有林" in kinds:
+                    values_data["permits"]["33"] = {"req": "要",
+                        "note": "地域森林計画対象民有林に該当 (A13)。1ha超開発は林地開発許可、伐採は届出"}
+                notes.append(f"森林地域/保安林をA13から1次判定：{val}")
+        except Exception as e:
+            print(f"[gen] A13 judge error: {type(e).__name__}: {e}", flush=True)
+            notes.append(f"森林/保安林の判定でエラー（{type(e).__name__}）。都道府県の森林GISで目視確認してください。")
+    else:
+        notes.append("都道府県コードを特定できず、農地・森林の判定はスキップしました。地図で目視確認してください。")
+    print(f"[gen] judges done in {time.time()-_t0:.1f}s", flush=True)
 
     # values.json 書き出し
     vpath = os.path.join(work, "values.json")
