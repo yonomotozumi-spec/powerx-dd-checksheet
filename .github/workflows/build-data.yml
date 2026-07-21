@@ -22,12 +22,16 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 300
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: Install mapshaper (once)
+        run: npm install -g mapshaper
       - name: Build A12/A13 bundled data
         run: bash scripts/build_ksj_data.sh
       - name: Commit generated data
