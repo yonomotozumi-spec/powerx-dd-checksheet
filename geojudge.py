@@ -23,7 +23,7 @@ DATA = os.path.join(BASEDIR, "data")
 # 直近の県データをプロセス内に少数だけ保持（512MB枠を圧迫しないよう上限を設ける）
 _CACHE = {}
 _ORDER = []
-_CACHE_MAX = 6
+_CACHE_MAX = 3  # 512MB枠に合わせ控えめに（大県の同時保持を避ける）
 
 
 def _norm_area(area):
@@ -120,8 +120,9 @@ def _hits(kind, area, lat, lon):
 # ───────────────────────── 森林 / 保安林（A13） ─────────────────────────
 def judge_hoanrin(lat, lon, area):
     """戻り値: (value, comment, kinds)。データ未整備なら (None, comment, None)。"""
-    base_c = ("国土数値情報A13(森林地域)より1次判定。保安林内は立木伐採・土地形質変更に許可、"
-              "開発には解除が必要な場合あり。指定範囲・可否は都道府県森林部局へ照会（参考精度）")
+    base_c = ("国土数値情報A13(森林地域)より1次判定（収録: 保安林/保安施設地区/地域森林計画対象民有林。"
+              "国有林は非収録）。保安林内は立木伐採・土地形質変更に許可、開発には解除が必要な場合あり。"
+              "指定範囲・可否は都道府県森林部局へ照会（参考精度）")
     a = _norm_area(area)
     hits = _hits("a13", a, lat, lon) if a else None
     if hits is None:
