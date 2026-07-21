@@ -159,6 +159,8 @@ def judge_aochi(lat, lon, area):
         kinds.add(str(k))
         if not muni:
             muni = str(p.get("m") or p.get("ctv_name") or "")
+    if len(muni) > 16:  # 一部事務組合等でCTV_NAMEが全市町村連結になる場合に短縮
+        muni = muni[:16] + "…"
     suffix = (f"／{muni}" if muni else "")
     if ("青地" in kinds) or ("6" in kinds) or ("06" in kinds):
         return ("青地（農用地区域内）" + suffix, base_c)
