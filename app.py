@@ -27,6 +27,23 @@ OUT_DIR = os.path.join(tempfile.gettempdir(), "pxapp_out")
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(OUT_DIR, exist_ok=True)
 
+# reinfolibのタイル応答(code×z/x/y)を永続ディスクにキャッシュする置き場とTTL。
+# A12/A13は県単位で温める一方、reinfolibは毎リクエストで12レイヤをネット取得していた。
+# タイル単位で保存すると、近隣案件（同一タイル≒1〜2km）の再判定でネット取得を丸ごと省ける。
+REINFO_CACHE_DIR = os.path.join(DATA_DIR, "reinfolib_tiles")
+
+
+def _env_float(name, default):
+    """環境変数を数値で読む。未設定・空文字・不正値なら default（ダッシュボードで空欄にしても落ちない）。"""
+    try:
+        v = os.environ.get(name, "").strip()
+        return float(v) if v else float(default)
+    except ValueError:
+        return float(default)
+
+
+REINFO_CACHE_TTL = _env_float("REINFO_CACHE_TTL_DAYS", 30) * 86400.0
+
 # 社内共有のreinfolib APIキー（環境変数。コードには書かない）
 SERVER_KEY = os.environ.get("REINFOLIB_API_KEY", "").strip()
 # 社内限定アクセス用のBasic認証（任意）
@@ -132,20 +149,63 @@ def pref_code(lat, lon):
     return None
 
 
+def _reinfo_cache_path(code, z, x, y):
+    return os.path.join(REINFO_CACHE_DIR, code, str(z), str(x), f"{y}.geojson")
+
+
+def _reinfo_cache_read(path):
+    """タイルキャッシュが存在しTTL内なら本文を返す。無ければ/期限切れなら None。"""
+    try:
+        if (time.time() - os.path.getmtime(path)) < REINFO_CACHE_TTL:
+            with open(path, encoding="utf-8") as f:
+                return f.read()
+    except OSError:
+        pass
+    return None
+
+
+def _reinfo_cache_write(path, body):
+    """正常なGeoJSON本文だけを原子的に保存する。認証エラー/HTML等は保存しない
+    （毒キャッシュ防止）。ディスク不足時などの失敗は無視して判定を続行する。"""
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return
+    if not (isinstance(obj, dict) and ("features" in obj or obj.get("type") == "FeatureCollection")):
+        return
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # 同一タイルを同時取得する別リクエストとtmpを共有しないよう書き手ごとに一意名にする
+        tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(body)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
 def fetch_reinfolib(lat, lon, key, dest):
-    """reinfolibの各レイヤをヘッダ認証で並列取得し dest/<CODE>.geojson に保存。取得数を返す。"""
+    """reinfolibの各レイヤを取得し dest/<CODE>.geojson に保存。取得数を返す。
+    タイル(code×z/x/y)単位で永続ディスクにキャッシュし、ヒット時はネット取得を省く。"""
     os.makedirs(dest, exist_ok=True)
 
     def one(item):
         code, (z, _d) = item
         x, y = reinfolib_judge.deg2num(lat, lon, z)
-        url = REINFO.format(code=code, z=z, x=x, y=y)
+        cpath = _reinfo_cache_path(code, z, x, y)
+        body = _reinfo_cache_read(cpath)          # キャッシュ・ヒットならネット不要
+        if body is None:                          # ミス→ヘッダ認証で取得し、正常なら保存
+            try:
+                body = _get(REINFO.format(code=code, z=z, x=x, y=y),
+                            headers={"Ocp-Apim-Subscription-Key": key})
+            except Exception:
+                return 0
+            _reinfo_cache_write(cpath, body)
         try:
-            body = _get(url, headers={"Ocp-Apim-Subscription-Key": key})
             with open(os.path.join(dest, code + ".geojson"), "w", encoding="utf-8") as f:
                 f.write(body)
             return 1
-        except Exception:
+        except OSError:
             return 0
 
     items = list(reinfolib_judge.LAYERS.items())
@@ -476,6 +536,21 @@ def _diag_report():
         rep["data_dir_size_mb"] = round(total / 1e6, 1)
     except Exception as e:
         rep["cache_error"] = str(e)
+    # reinfolib タイルキャッシュ（近隣案件の再判定を高速化）の件数・容量
+    try:
+        n = sz = 0
+        if os.path.isdir(REINFO_CACHE_DIR):
+            for root, _dirs, files in os.walk(REINFO_CACHE_DIR):
+                for fn in files:
+                    if fn.endswith(".geojson"):
+                        n += 1
+                        try: sz += os.path.getsize(os.path.join(root, fn))
+                        except OSError: pass
+        rep["reinfo_tiles_cached"] = n
+        rep["reinfo_tiles_mb"] = round(sz / 1e6, 1)
+        rep["reinfo_cache_ttl_days"] = round(REINFO_CACHE_TTL / 86400.0, 1)
+    except Exception as e:
+        rep["reinfo_tiles_error"] = str(e)
     rep["judge"] = ("separate_mount=true かつ 再起動後も boot_count が増え first_boot が不変で "
                     "cached_* が残っていれば【永続】。boot_count が毎回1に戻り cached_* が空なら【非永続】。")
     return rep
