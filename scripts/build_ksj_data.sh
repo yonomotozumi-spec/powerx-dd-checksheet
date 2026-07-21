@@ -37,8 +37,8 @@ for i in $(seq -w 1 47); do
   if fetch "https://nlftp.mlit.go.jp/ksj/gml/data/A12/A12-15/A12-15_${i}_GML.zip" "$WORK/a.zip" \
      && unzip -oq "$WORK/a.zip" -d "$WORK/x"; then
     parts=()
-    shp05=$(find "$WORK/x" -name "*_05.shp" | head -1)
-    shp06=$(find "$WORK/x" -name "*_06.shp" | head -1)
+    shp05=$(find "$WORK/x" -name "*05.shp" | head -1)
+    shp06=$(find "$WORK/x" -name "*06.shp" | head -1)
     if [ -n "$shp05" ] && ms -i "$shp05" encoding=cp932 \
          -each 'k="農業地域", m=this.properties.CTV_NAME || this.properties.ctv_name || ""' \
          -filter-fields k,m -simplify 15% keep-shapes \
@@ -74,6 +74,7 @@ for i in $(seq -w 1 47); do
       n=$((n+1))
       if ms -i "$shp" encoding=cp932 \
            -each 'var c=+(this.properties.layer_no||this.properties.LAYER_NO||this.properties.A13_001||0); k = c==3||c==10 ? "保安林" : c==4 ? "保安施設地区" : c==2||c==9 ? "地域森林計画対象民有林" : c==1||c==8 ? "国有林" : c==7 ? "森林地域" : "区分"+c' \
+           -filter 'k=="保安林" || k=="保安施設地区" || k=="地域森林計画対象民有林"' \
            -filter-fields k -simplify 15% keep-shapes \
            -o format=geojson precision=0.00001 "$WORK/f${n}.geojson"; then
         fparts+=("$WORK/f${n}.geojson")
