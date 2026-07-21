@@ -74,7 +74,7 @@ for i in $(seq -w 1 47); do
       n=$((n+1))
       if ms -i "$shp" encoding=cp932 \
            -each 'var c=+(this.properties.layer_no||this.properties.LAYER_NO||this.properties.A13_001||0); k = c==3||c==10 ? "保安林" : c==4 ? "保安施設地区" : c==2||c==9 ? "地域森林計画対象民有林" : c==1||c==8 ? "国有林" : c==7 ? "森林地域" : "区分"+c' \
-           -filter 'k=="保安林" || k=="保安施設地区" || k=="地域森林計画対象民有林"' \
+           -filter 'k=="保安林" || k=="保安施設地区"'  `# 民有林は巨大(北海道展開94MB→OOM)のため非収録` \
            -filter-fields k -simplify 15% keep-shapes \
            -o format=geojson precision=0.00001 "$WORK/f${n}.geojson"; then
         fparts+=("$WORK/f${n}.geojson")
